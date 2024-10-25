@@ -1,79 +1,105 @@
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue
-import threading
-from urllib.parse import urljoin
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
+import time
+import csv
+import logging
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
-def get_all_product_links(driver, wait):
-    """Get all product links from all pages at once"""
+def collect_product_links(driver, wait):
+    """Collect all product links from all pages first"""
     all_links = []
     page = 1
+    base_url = "https://nexgenvetrx.com/search.php?page={}&section=product&search_query=inject"
     
-    while page <= 6:  # Process all 6 pages
-        url = f"https://nexgenvetrx.com/search.php?page={page}&section=product&search_query=inject"
+    while page <= 6:
+        url = base_url.format(page)
         driver.get(url)
-        time.sleep(1)
+        time.sleep(2)
         
-        # Get all products on current page
         containers = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "article.product-item-container")))
         
-        # Extract links and basic info
+        page_links = []
         for container in containers:
             try:
                 link_element = container.find_element(By.CSS_SELECTOR, "h4.card-title a")
-                description = container.find_element(By.CSS_SELECTOR, "div.description").text.strip()
-                all_links.append({
+                page_links.append({
                     'url': link_element.get_attribute('href'),
                     'name': link_element.text.strip(),
-                    'description': description
+                    'description': container.find_element(By.CSS_SELECTOR, "div.description").text.strip()
                 })
             except Exception as e:
-                logging.error(f"Error getting product link on page {page}: {e}")
+                logging.error(f"Error collecting link on page {page}: {e}")
                 continue
-                
-        page += 1
         
-    logging.info(f"Found {len(all_links)} products total")
+        all_links.extend(page_links)
+        logging.info(f"Collected {len(page_links)} links from page {page}")
+        page += 1
+    
     return all_links
 
-def process_product(product_info):
-    """Process a single product page"""
+def process_single_product(product_info):
+    """Process a single product in its own browser instance"""
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     wait = WebDriverWait(driver, 10)
     
     try:
-        details = get_product_details(product_info['url'])
-        if details:
-            details.update({
-                'Product Name': product_info['name'],
-                'URL': product_info['url'],
-                'Description': product_info['description']
-            })
-            return details
+        driver.get(product_info['url'])
+        time.sleep(2)
+        
+        info_dl = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".productView-info-dl")))
+        details = {
+            'Product Name': product_info['name'],
+            'URL': product_info['url'],
+            'Description': product_info['description']
+        }
+        
+        # Get specifications
+        dt_elements = info_dl.find_elements(By.TAG_NAME, "dt")
+        dd_elements = info_dl.find_elements(By.TAG_NAME, "dd")
+        
+        for dt, dd in zip(dt_elements, dd_elements):
+            key = dt.text.strip(':')
+            value = dd.text.strip()
+            details[key] = value
+            
+        logging.info(f"Successfully processed: {product_info['name']}")
+        return details
+        
     except Exception as e:
         logging.error(f"Error processing {product_info['name']}: {e}")
+        return None
     finally:
         driver.quit()
-    
-    return None
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     
-    # Initial driver to get all links
+    # Initial driver to collect all links
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     wait = WebDriverWait(driver, 10)
     
     try:
-        # Get all product links first
-        all_product_links = get_all_product_links(driver, wait)
+        # First collect all product links
+        all_product_links = collect_product_links(driver, wait)
+        logging.info(f"Collected total of {len(all_product_links)} product links")
     finally:
         driver.quit()
     
     # Process products in parallel
     all_products = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(executor.map(process_product, all_product_links))
-        all_products = [p for p in results if p]
+    with ThreadPoolExecutor(max_workers=5) as executor:  # Process 5 products simultaneously
+        future_to_product = {executor.submit(process_single_product, product): product 
+                           for product in all_product_links}
+        
+        for future in future_to_product:
+            result = future.result()
+            if result:
+                all_products.append(result)
     
     # Save to CSV
     if all_products:
