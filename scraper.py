@@ -16,28 +16,34 @@ def collect_product_links(driver, wait):
     page = 1
     base_url = "https://nexgenvetrx.com/search.php?page={}&section=product&search_query=inject"
     
-    while page <= 6:
+    while page <= 1:
         url = base_url.format(page)
+        logging.info(f"\n{'='*50}\nProcessing search page {page}: {url}")
         driver.get(url)
         time.sleep(2)
         
-        containers = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "article.product-item-container")))
+        containers = wait.until(EC.presence_of_all_elements_located((
+            By.CSS_SELECTOR, "article.product-item-container")))
+        logging.info(f"Found {len(containers)} product containers on page {page}")
         
         page_links = []
-        for container in containers:
+        for idx, container in enumerate(containers, 1):
             try:
                 link_element = container.find_element(By.CSS_SELECTOR, "h4.card-title a")
-                page_links.append({
+                product_data = {
                     'url': link_element.get_attribute('href'),
-                    'name': link_element.text.strip(),
-                    'description': container.find_element(By.CSS_SELECTOR, "div.description").text.strip()
-                })
+                    'name': link_element.text.strip()
+                }
+                page_links.append(product_data)
+                logging.info(f"Page {page} - Product {idx}:")
+                logging.info(f"  Name: {product_data['name']}")
+                logging.info(f"  URL: {product_data['url']}")
             except Exception as e:
-                logging.error(f"Error collecting link on page {page}: {e}")
+                logging.error(f"Error collecting link on page {page}, product {idx}: {str(e)}")
                 continue
         
         all_links.extend(page_links)
-        logging.info(f"Collected {len(page_links)} links from page {page}")
+        logging.info(f"\nCompleted page {page}: Collected {len(page_links)} products")
         page += 1
     
     return all_links
@@ -47,37 +53,60 @@ def process_single_product(product_info):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     wait = WebDriverWait(driver, 10)
     
+    logging.info(f"\n{'='*50}\nProcessing product: {product_info['name']}")
+    logging.info(f"URL: {product_info['url']}")
+    
     try:
         driver.get(product_info['url'])
         time.sleep(2)
         
+        # Get the full description
+        try:
+            description_element = wait.until(EC.presence_of_element_located((
+                By.CSS_SELECTOR, "#tab-description")))
+            description = description_element.text.strip()
+            logging.info(f"\nDescription found ({len(description)} characters):")
+            logging.info(f"{description[:200]}...") # Log first 200 chars
+        except Exception as e:
+            logging.error(f"Error getting description: {str(e)}")
+            description = ""
+            
+        # Get product details
         info_dl = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".productView-info-dl")))
         details = {
-            'Product Name': product_info['name'],
-            'URL': product_info['url'],
-            'Description': product_info['description']
+            'name': product_info['name'],
+            'url': product_info['url'],
+            'description': description
         }
         
-        # Get specifications
-        dt_elements = info_dl.find_elements(By.TAG_NAME, "dt")
-        dd_elements = info_dl.find_elements(By.TAG_NAME, "dd")
+        # Log the collected data
+        logging.info("\nCollected product details:")
+        for key, value in details.items():
+            if key == 'description':
+                logging.info(f"{key}: {value[:100]}...")  # First 100 chars of description
+            else:
+                logging.info(f"{key}: {value}")
         
-        for dt, dd in zip(dt_elements, dd_elements):
-            key = dt.text.strip(':')
-            value = dd.text.strip()
-            details[key] = value
-            
-        logging.info(f"Successfully processed: {product_info['name']}")
         return details
         
     except Exception as e:
-        logging.error(f"Error processing {product_info['name']}: {e}")
+        logging.error(f"Error processing product {product_info['name']}: {str(e)}")
         return None
     finally:
         driver.quit()
 
 def main():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # Set up logging to both file and console
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('scraper_debug.log'),
+            logging.StreamHandler()
+        ]
+    )
+    
+    logging.info("\nStarting web scraper...")
     
     # Initial driver to collect all links
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
@@ -86,13 +115,13 @@ def main():
     try:
         # First collect all product links
         all_product_links = collect_product_links(driver, wait)
-        logging.info(f"Collected total of {len(all_product_links)} product links")
+        logging.info(f"\nCollected total of {len(all_product_links)} product links")
     finally:
         driver.quit()
     
     # Process products in parallel
     all_products = []
-    with ThreadPoolExecutor(max_workers=5) as executor:  # Process 5 products simultaneously
+    with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_product = {executor.submit(process_single_product, product): product 
                            for product in all_product_links}
         
@@ -100,24 +129,32 @@ def main():
             result = future.result()
             if result:
                 all_products.append(result)
+                logging.info(f"Added product to final list: {result['name']}")
     
     # Save to CSV
     if all_products:
-        fieldnames = set()
-        for product in all_products:
-            fieldnames.update(product.keys())
+        # Define specific fieldnames in the order we want
+        fieldnames = ['name', 'url', 'description']
         
         try:
-            with open("injectables_with_details.csv", "w", newline="", encoding='utf-8') as file:
-                writer = csv.DictWriter(file, fieldnames=list(fieldnames))
+            filename = "injectables_with_details.csv"
+            with open(filename, "w", newline="", encoding='utf-8-sig') as file:  # Note the utf-8-sig encoding
+                writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
                 writer.writeheader()
                 for product in all_products:
-                    writer.writerow(product)
-                logging.info("Data successfully written to injectables_with_details.csv")
+                    # Ensure all fields exist in the product dict
+                    row = {
+                        'name': product.get('name', ''),
+                        'url': product.get('url', ''),
+                        'description': product.get('description', '')
+                    }
+                    writer.writerow(row)
+                logging.info(f"\nData successfully written to {filename}")
+                logging.info(f"Fields saved: {', '.join(fieldnames)}")
         except Exception as e:
-            logging.error(f"Failed to write to CSV file: {e}")
+            logging.error(f"Failed to write to CSV file: {str(e)}")
     
-    print(f"\nTotal products processed: {len(all_products)}")
+    logging.info(f"\nScraping completed. Total products processed: {len(all_products)}")
 
 if __name__ == "__main__":
     main()
