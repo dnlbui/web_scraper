@@ -9,6 +9,8 @@ import csv
 import logging
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+import pandas as pd
+import csv
 
 def collect_product_links(driver, wait):
     """Collect all product links from all pages first"""
@@ -16,7 +18,7 @@ def collect_product_links(driver, wait):
     page = 1
     base_url = "https://nexgenvetrx.com/search.php?page={}&section=product&search_query=inject"
     
-    while page <= 1:
+    while page <= 10:
         url = base_url.format(page)
         logging.info(f"\n{'='*50}\nProcessing search page {page}: {url}")
         driver.get(url)
@@ -121,7 +123,7 @@ def main():
     
     # Process products in parallel
     all_products = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         future_to_product = {executor.submit(process_single_product, product): product 
                            for product in all_product_links}
         
@@ -133,28 +135,44 @@ def main():
     
     # Save to CSV
     if all_products:
-        # Define specific fieldnames in the order we want
-        fieldnames = ['name', 'url', 'description']
-        
         try:
             filename = "injectables_with_details.csv"
-            with open(filename, "w", newline="", encoding='utf-8-sig') as file:  # Note the utf-8-sig encoding
-                writer = csv.DictWriter(file, fieldnames=fieldnames, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
+            fieldnames = ['name', 'url', 'description']
+            
+            with open(filename, 'w', newline='', encoding='utf-8') as file:
+                writer = csv.DictWriter(file, 
+                                    fieldnames=fieldnames,
+                                    delimiter=',',
+                                    quoting=csv.QUOTE_ALL)
+                
                 writer.writeheader()
+                
                 for product in all_products:
-                    # Ensure all fields exist in the product dict
-                    row = {
-                        'name': product.get('name', ''),
-                        'url': product.get('url', ''),
-                        'description': product.get('description', '')
+                    # Clean and truncate the description
+                    description = (product['description']
+                        .strip()
+                        .replace('\n', ' ')
+                        .replace('\r', ' ')
+                        .replace('\t', ' ')
+                        .replace('"', "'"))
+                    
+                    # Remove multiple spaces
+                    description = ' '.join(description.split())
+                    
+                    # Truncate to first 500 chars and add ellipsis if needed
+                    if len(description) > 500:
+                        description = description[:500].rsplit(' ', 1)[0] + "..."
+                        
+                    cleaned_product = {
+                        'name': product['name'].strip(),
+                        'url': product['url'].strip(),
+                        'description': description
                     }
-                    writer.writerow(row)
-                logging.info(f"\nData successfully written to {filename}")
-                logging.info(f"Fields saved: {', '.join(fieldnames)}")
+                    writer.writerow(cleaned_product)
+            
+            logging.info(f"\nData successfully written to {filename}")
         except Exception as e:
             logging.error(f"Failed to write to CSV file: {str(e)}")
-    
-    logging.info(f"\nScraping completed. Total products processed: {len(all_products)}")
 
 if __name__ == "__main__":
     main()
