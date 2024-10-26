@@ -1,12 +1,13 @@
 import logging
 import csv
+import json
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
-import config
+from site1_scraper import config
 
 def process_single_product(product_info, rate_limiter):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
@@ -51,10 +52,9 @@ def process_single_product(product_info, rate_limiter):
     finally:
         driver.quit()
 
-def save_to_csv(all_products):
+def save_to_csv(all_products, filename, full_description=False):
     if all_products:
         try:
-            filename = config.OUTPUT_FILE
             fieldnames = ['name', 'url', 'description']
             
             with open(filename, 'w', newline='', encoding='utf-8') as file:
@@ -66,7 +66,7 @@ def save_to_csv(all_products):
                 writer.writeheader()
                 
                 for product in all_products:
-                    description = clean_description(product['description'])
+                    description = clean_description(product['description'], full_description)
                     cleaned_product = {
                         'name': product['name'].strip(),
                         'url': product['url'].strip(),
@@ -78,7 +78,27 @@ def save_to_csv(all_products):
         except Exception as e:
             logging.error(f"Failed to write to CSV file: {str(e)}")
 
-def clean_description(description):
+def save_to_json(all_products, filename, full_description=False):
+    if all_products:
+        try:
+            cleaned_products = []
+            for product in all_products:
+                description = clean_description(product['description'], full_description)
+                cleaned_product = {
+                    'name': product['name'].strip(),
+                    'url': product['url'].strip(),
+                    'description': description
+                }
+                cleaned_products.append(cleaned_product)
+            
+            with open(filename, 'w', encoding='utf-8') as file:
+                json.dump(cleaned_products, file, ensure_ascii=False, indent=2)
+            
+            logging.info(f"\nData successfully written to {filename}")
+        except Exception as e:
+            logging.error(f"Failed to write to JSON file: {str(e)}")
+
+def clean_description(description, full_description=False):
     description = (description
         .strip()
         .replace('\n', ' ')
@@ -88,7 +108,7 @@ def clean_description(description):
     
     description = ' '.join(description.split())
     
-    if len(description) > 500:
+    if not full_description and len(description) > 500:
         description = description[:500].rsplit(' ', 1)[0] + "..."
     
     return description

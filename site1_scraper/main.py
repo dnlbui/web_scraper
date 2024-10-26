@@ -4,13 +4,20 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
+import argparse
+import json
 
-from browser_actions import collect_product_links
-from data_processing import process_single_product, save_to_csv
+from site1_scraper.browser_actions import collect_product_links
+from site1_scraper.data_processing import process_single_product, save_to_csv, save_to_json
 from common.rate_limiter import RateLimiter
-import config
+from site1_scraper import config
 
 def main():
+    parser = argparse.ArgumentParser(description='Web scraper for product information')
+    parser.add_argument('--json', action='store_true', help='Save output as JSON instead of CSV')
+    parser.add_argument('--full-description', action='store_true', help='Do not limit description length')
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -44,7 +51,10 @@ def main():
                 all_products.append(result)
                 logging.info(f"Added product to final list: {result['name']}")
     
-    save_to_csv(all_products, config.OUTPUT_FILE)
+    if args.json:
+        save_to_json(all_products, config.OUTPUT_FILE.replace('.csv', '.json'), args.full_description)
+    else:
+        save_to_csv(all_products, config.OUTPUT_FILE, args.full_description)
 
 if __name__ == "__main__":
     main()

@@ -2,7 +2,7 @@ import time
 import logging
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
-import config
+from site1_scraper import config
 
 def collect_product_links(driver, wait, rate_limiter):
     all_links = []
