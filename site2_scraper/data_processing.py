@@ -38,7 +38,7 @@ def process_single_product(product, rate_limiter):
         add_random_delay(2, 4)
         
         # Get and handle variations
-        variations = get_product_variations(driver, wait)
+        variations = get_product_variations(driver, wait, product['url'])
         if variations:
             logging.info(f"Found variations: {variations}")
             # Create product data for cart addition

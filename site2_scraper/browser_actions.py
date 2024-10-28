@@ -70,11 +70,16 @@ def add_product_to_cart(driver, wait, product_data, rate_limiter):
     try:
         rate_limiter.wait()
         
-        # Set quantity first
+        # Navigate to product page if URL provided
+        if 'url' in product_data:
+            driver.get(product_data['url'])
+            add_random_delay(1, 2)
+        
+        # Set quantity first (if field exists)
         try:
             quantity_input = wait.until(EC.presence_of_element_located((By.ID, "quantity")))
             quantity_input.clear()
-            quantity_input.send_keys("15")
+            quantity_input.send_keys(config.QUANTITY)
             add_random_delay(1, 2)
         except Exception as e:
             logging.warning(f"Failed to set quantity: {str(e)}")
@@ -84,25 +89,80 @@ def add_product_to_cart(driver, wait, product_data, rate_limiter):
             select_variation(driver, wait, product_data['variations'])
             add_random_delay(1, 2)
         
-        # Find and click add to cart button
+        # Click add to cart button
+        add_to_cart_button = wait.until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "a.single_add_to_cart_button, button.single_add_to_cart_button")))
+        add_to_cart_button.click()
+        add_random_delay(2, 3)
+        
+        # Handle the prescription form that appears
         try:
-            add_to_cart_button = wait.until(EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, "a.single_add_to_cart_button, button.single_add_to_cart_button")))
-            add_to_cart_button.click()
+            # Wait for the form to appear
+            form = wait.until(EC.presence_of_element_located((By.ID, "prospmainforp")))
             
-            # Wait for either success message or error message
+            # Select pet name (first option)
+            pet_select = wait.until(EC.presence_of_element_located((By.ID, "petidname")))
+            pet_select = Select(pet_select)
+            options = pet_select.options
+            # Select first non-empty option that's not "Add Another Pet"
+            for option in options:
+                if option.get_attribute("value") and option.get_attribute("value") != "" and option.get_attribute("value") != "Add Another Pet":
+                    pet_select.select_by_value(option.get_attribute("value"))
+                    break
+            add_random_delay(0.5, 1)
+            
+            # Select number of refills (select "0")
+            refill_select = wait.until(EC.presence_of_element_located((By.ID, "no_of_refillforclinic")))
+            refill_select = Select(refill_select)
+            refill_select.select_by_value("0")
+            add_random_delay(0.5, 1)
+            
+            # Select doctor (first available)
+            doctor_select = wait.until(EC.presence_of_element_located((By.ID, "doctoridforp")))
+            doctor_select = Select(doctor_select)
+            options = doctor_select.options
+            # Select first non-empty option that's not "Another Doctor"
+            for option in options:
+                if option.get_attribute("value") and option.get_attribute("value") != "" and option.get_attribute("value") != "Another Doctor":
+                    doctor_select.select_by_value(option.get_attribute("value"))
+                    break
+            add_random_delay(0.5, 1)
+            
+            # Click continue button
+            continue_button = wait.until(EC.element_to_be_clickable(
+                (By.ID, "continuebutton")))
+            continue_button.click()
+            add_random_delay(2, 3)
+            
+            # Wait for success message or cart update
             success = wait.until(EC.presence_of_element_located((
                 By.CSS_SELECTOR, 
-                ".woocommerce-message, .cart-updated, .woocommerce-error"
+                ".woocommerce-message, .cart-updated, .woocommerce-error, .cart-contents"
             )))
             
-            if "error" in success.get_attribute("class"):
+            if "error" not in success.get_attribute("class"):
+                logging.info(f"Successfully added product to cart: {product_data.get('url')}")
+                
+                # Extract cart data
+                cart_items = []
+                items = driver.find_elements(By.CSS_SELECTOR, ".cart_item")
+                for item in items:
+                    item_data = {
+                        'name': item.find_element(By.CSS_SELECTOR, ".product-name").text,
+                        'price': item.find_element(By.CSS_SELECTOR, ".product-price").text,
+                        'quantity': item.find_element(By.CSS_SELECTOR, ".product-quantity input").get_attribute("value"),
+                        'variations': product_data.get('variations', {}),
+                        'url': product_data.get('url')
+                    }
+                    cart_items.append(item_data)
+                
+                # Save cart data incrementally
+                save_cart_data_incrementally(cart_items)
+            else:
                 raise Exception(f"Error adding to cart: {success.text}")
                 
-            logging.info(f"Successfully added product to cart: {product_data.get('url', 'Unknown URL')}")
-            
         except Exception as e:
-            logging.error(f"Failed to add product to cart: {str(e)}")
+            logging.error(f"Failed to fill prescription form: {str(e)}")
             raise
             
     except Exception as e:
@@ -320,11 +380,10 @@ def get_next_combination(variations, completed_combinations):
             'values': values
         }
 
-def get_product_variations(driver, wait):
+def get_product_variations(driver, wait, url):  # Add url parameter
     """Get all possible variations for a product"""
     try:
         logging.info("Waiting for variations form...")
-        # Wait for the variations form to be present
         form = wait.until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "form.variations_form, span.variations_form"))
         )
@@ -334,6 +393,9 @@ def get_product_variations(driver, wait):
         if variations_data:
             variations = json.loads(variations_data)
             logging.info(f"Found {len(variations)} variations in data attribute")
+            
+            # Save variations data
+            save_variations_data(url, variations)
             
             # Extract the first variation's attributes as our default selection
             if variations:
@@ -420,4 +482,26 @@ def set_quantity(driver, wait, quantity):
     quantity_input = wait.until(EC.presence_of_element_located((By.NAME, "quantity")))
     quantity_input.clear()
     quantity_input.send_keys(str(quantity))
+
+def save_variations_data(url, variations_data):
+    """Save variations data to JSON file"""
+    try:
+        filename = 'variations.json'
+        data = {}
+        
+        # Load existing data if file exists
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                data = json.load(f)
+        
+        # Add new variations data
+        data[url] = variations_data
+        
+        # Save updated data
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=2)
+            
+    except Exception as e:
+        logging.error(f"Error saving variations data: {str(e)}")
+
 

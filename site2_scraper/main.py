@@ -89,7 +89,7 @@ def process_product_variations(product_url, rate_limiter):
         driver.get(product_url)
         add_random_delay(2, 4)
         
-        variations = get_product_variations(driver, wait)
+        variations = get_product_variations(driver, wait, product_url)
         logging.info(f"Found {len(variations)} variations to process")
         
         # Close initial browser
