@@ -65,53 +65,49 @@ def login(driver, wait, rate_limiter):
         logging.error(f"Failed to log in after 3 attempts: {str(e)}")
         raise
 
-def add_product_to_cart(driver, wait, product_element, rate_limiter):
+def add_product_to_cart(driver, wait, product_data, rate_limiter):
     """Handle the process of adding a single product to cart"""
     try:
-        rate_limiter.wait_if_needed()
+        rate_limiter.wait()
         
-        # Get product name for logging
-        product_name = product_element.find_element(By.CSS_SELECTOR, ".product-name").text
-        logging.info(f"Processing product: {product_name}")
+        # Set quantity first
+        try:
+            quantity_input = wait.until(EC.presence_of_element_located((By.ID, "quantity")))
+            quantity_input.clear()
+            quantity_input.send_keys("15")
+            add_random_delay(1, 2)
+        except Exception as e:
+            logging.warning(f"Failed to set quantity: {str(e)}")
         
-        # First dropdown selections
-        dropdown1 = Select(product_element.find_element(By.CSS_SELECTOR, "select#dropdown1_id"))
-        add_random_delay(0.5, 1)
-        dropdown1.select_by_index(1)
+        # Select variations if provided
+        if product_data.get('variations'):
+            select_variation(driver, wait, product_data['variations'])
+            add_random_delay(1, 2)
         
-        dropdown2 = Select(product_element.find_element(By.CSS_SELECTOR, "select#dropdown2_id"))
-        add_random_delay(0.5, 1)
-        dropdown2.select_by_index(1)
-        
-        add_random_delay(1, 2)
-        add_to_cart = product_element.find_element(By.CSS_SELECTOR, "button.add-to-cart")
-        add_to_cart.click()
-        
-        # Handle modal form
-        form_modal = wait.until(EC.presence_of_element_located((
-            By.CSS_SELECTOR, ".modal-form")))
-        add_random_delay(1, 2)
-        
-        modal_dropdown1 = Select(form_modal.find_element(By.CSS_SELECTOR, "select#modal_dropdown1_id"))
-        add_random_delay(0.5, 1)
-        modal_dropdown1.select_by_index(1)
-        
-        modal_dropdown2 = Select(form_modal.find_element(By.CSS_SELECTOR, "select#modal_dropdown2_id"))
-        add_random_delay(0.5, 1)
-        modal_dropdown2.select_by_index(1)
-        
-        add_random_delay(1, 2)
-        submit_button = form_modal.find_element(By.CSS_SELECTOR, "button[type='submit']")
-        submit_button.click()
-        
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".success-message")))
-        logging.info(f"Successfully added {product_name} to cart")
-        add_random_delay(2, 4)
-        
+        # Find and click add to cart button
+        try:
+            add_to_cart_button = wait.until(EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "a.single_add_to_cart_button, button.single_add_to_cart_button")))
+            add_to_cart_button.click()
+            
+            # Wait for either success message or error message
+            success = wait.until(EC.presence_of_element_located((
+                By.CSS_SELECTOR, 
+                ".woocommerce-message, .cart-updated, .woocommerce-error"
+            )))
+            
+            if "error" in success.get_attribute("class"):
+                raise Exception(f"Error adding to cart: {success.text}")
+                
+            logging.info(f"Successfully added product to cart: {product_data.get('url', 'Unknown URL')}")
+            
+        except Exception as e:
+            logging.error(f"Failed to add product to cart: {str(e)}")
+            raise
+            
     except Exception as e:
         logging.error(f"Failed to add product to cart: {str(e)}")
         raise
-
 
 def navigate_to_sorted_products(driver, wait, rate_limiter):
     try:
@@ -234,6 +230,194 @@ def collect_product_links(driver, wait, rate_limiter):
     logging.info(f"Saved {len(all_product_links)} product links to {json_file_path}")
     return all_product_links
 
+def handle_variations(driver, wait, product_url, combinations_tracker):
+    """Handle all possible combinations of product variations"""
+    try:
+        # Wait for variations to be present
+        variation_selects = wait.until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "select[data-attribute_name]"))
+        )
+        
+        if not variation_selects:
+            logging.info("No variations found for this product")
+            return True
+        
+        # Get all options for each variation
+        variations = []
+        for select in variation_selects:
+            select_element = Select(select)
+            # Skip first option if it's a placeholder (like "Choose an option")
+            options = select_element.options[1:] if len(select_element.options) > 1 else select_element.options
+            variations.append({
+                'select': select_element,
+                'options': options,
+                'attribute': select.get_attribute('data-attribute_name')
+            })
+        
+        # Get completed combinations
+        completed_combinations = combinations_tracker.get_completed_combinations(product_url)
+        
+        # Try each combination
+        for combination in get_next_combination(variations, completed_combinations):
+            try:
+                # Select each option in the combination
+                for var_idx, option_idx in enumerate(combination['indices']):
+                    variations[var_idx]['select'].select_by_index(option_idx + 1)  # +1 to skip placeholder
+                    time.sleep(1)
+                
+                # Save the successful combination
+                combinations_tracker.save_combination(product_url, {
+                    'combination': combination['values'],
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'variations': {
+                        value['attribute']: value['value']
+                        for value in combination['values']
+                    }
+                })
+                
+                return True
+                
+            except Exception as e:
+                logging.warning(f"Failed to select combination {combination['values']}: {str(e)}")
+                continue
+        
+        return False
+            
+    except Exception as e:
+        logging.error(f"Error handling variations: {str(e)}")
+        return False
 
+def get_next_combination(variations, completed_combinations):
+    """Generator for getting next untried combination"""
+    # Get all possible combinations
+    option_counts = [len(var['options']) for var in variations]
+    total_combinations = 1
+    for count in option_counts:
+        total_combinations *= count
+    
+    for i in range(total_combinations):
+        # Calculate indices for this combination
+        indices = []
+        remainder = i
+        for count in reversed(option_counts):
+            indices.insert(0, remainder % count)
+            remainder //= count
+        
+        # Get the actual values for these indices
+        values = []
+        for var_idx, opt_idx in enumerate(indices):
+            values.append({
+                'attribute': variations[var_idx]['attribute'],
+                'value': variations[var_idx]['options'][opt_idx].text
+            })
+        
+        # Skip if this combination was already completed
+        if any(comb['combination'] == values for comb in completed_combinations):
+            continue
+            
+        yield {
+            'indices': indices,
+            'values': values
+        }
 
+def get_product_variations(driver, wait):
+    """Get all possible variations for a product"""
+    try:
+        logging.info("Waiting for variations form...")
+        # Wait for the variations form to be present
+        form = wait.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "form.variations_form, span.variations_form"))
+        )
+        
+        # Get the variations data from the data attribute
+        variations_data = form.get_attribute('data-product_variations')
+        if variations_data:
+            variations = json.loads(variations_data)
+            logging.info(f"Found {len(variations)} variations in data attribute")
+            
+            # Extract the first variation's attributes as our default selection
+            if variations:
+                first_variation = variations[0]
+                return first_variation.get('attributes', {})
+            
+        logging.info("No variations found in data attribute, checking for select elements...")
+        
+        # Fallback to select elements if no data attribute
+        selects = driver.find_elements(By.CSS_SELECTOR, "select[data-attribute_name]")
+        if not selects:
+            logging.info("No variation dropdowns found")
+            return None
+            
+        # Get all options for each dropdown
+        variation_data = {}
+        for select in selects:
+            name = select.get_attribute('data-attribute_name')
+            select_element = Select(select)
+            # Get first non-empty option
+            options = [opt.text for opt in select_element.options if opt.text.strip() and "Choose an option" not in opt.text]
+            if options:
+                variation_data[name] = options[0]  # Take first option
+                logging.info(f"Selected variation '{name}': {options[0]}")
+        
+        return variation_data if variation_data else None
+        
+    except Exception as e:
+        logging.error(f"Error getting variations: {str(e)}", exc_info=True)
+        return None
+
+def select_variation(driver, wait, variations):
+    """Select product variations from dropdowns"""
+    try:
+        for attribute, value in variations.items():
+            # Remove 'attribute_' prefix if it exists
+            attr_name = attribute.replace('attribute_', '')
+            select_name = f"attribute_{attr_name}"
+            
+            # Wait for and find the select element with a longer timeout
+            try:
+                select_element = wait.until(
+                    EC.presence_of_element_located((By.NAME, select_name))
+                )
+                select = Select(select_element)
+                
+                # Try both value and visible text
+                try:
+                    select.select_by_value(value)
+                except:
+                    # Try cleaning up the value (e.g., "1.25mg" -> "1-25mg")
+                    cleaned_value = value.replace('.', '-')
+                    try:
+                        select.select_by_value(cleaned_value)
+                    except:
+                        select.select_by_visible_text(value)
+                
+                logging.info(f"Selected variation {select_name}={value}")
+                add_random_delay(1, 2)  # Longer delay between selections
+                
+            except Exception as e:
+                logging.warning(f"Failed to set variation {select_name}={value}: {str(e)}")
+                # Continue with other variations instead of failing completely
+                continue
+                
+    except Exception as e:
+        logging.error(f"Error selecting variations: {str(e)}")
+        raise
+
+def generate_combinations(options_dict):
+    """Generate all possible combinations of options"""
+    import itertools
+    
+    keys = list(options_dict.keys())
+    values = list(options_dict.values())
+    combinations = []
+    
+    for combination in itertools.product(*values):
+        combinations.append(dict(zip(keys, combination)))
+    
+    return combinations
+
+def set_quantity(driver, wait, quantity):
+    quantity_input = wait.until(EC.presence_of_element_located((By.NAME, "quantity")))
+    quantity_input.clear()
+    quantity_input.send_keys(str(quantity))
 

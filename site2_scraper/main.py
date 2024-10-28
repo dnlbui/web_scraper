@@ -14,20 +14,21 @@ import concurrent.futures
 import time
 import argparse
 
-from site2_scraper.browser_actions import login, add_product_to_cart, collect_product_links, add_random_delay
-from site2_scraper.data_processing import process_single_product, extract_cart_data, save_cart_data
+from site2_scraper.browser_actions import login, add_product_to_cart, collect_product_links, add_random_delay, get_product_variations, select_variation, set_quantity
+from site2_scraper.data_processing import handle_product_specification_form, process_single_product, extract_cart_data, save_cart_data
 from common.rate_limiter import RateLimiter
 from site2_scraper import config
 
 class CartManager:
     def __init__(self):
-        self.product_queue = queue.Queue()
+        self.product_queue = queue.Queue() # Thread-safe queue for products
 
     def add_product(self, product):
-        self.product_queue.put(product)
+        self.product_queue.put(product) # Add products to queue
 
 def add_to_cart_from_queue(cart_manager, rate_limiter):
     """Process products from the queue and add them to cart"""
+    # Creates a new browser instance
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     wait = WebDriverWait(driver, 10)
     
@@ -60,6 +61,100 @@ def add_to_cart_from_queue(cart_manager, rate_limiter):
                 
     finally:
         driver.quit()
+
+def is_product_processed(product, existing_cart_data):
+    """Check if a product with specific variations has been processed"""
+    for existing_item in existing_cart_data:
+        if (product['name'] == existing_item['name'] and
+            product.get('variations', {}) == existing_item.get('variations', {})):
+            return True
+    return False
+
+def process_product_variations(product_url, rate_limiter):
+    """Process all variations for a single product"""
+    driver = None
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+        wait = WebDriverWait(driver, 45)
+        variation_tracker = ProductVariationTracker()
+        
+        # Get current status
+        status = variation_tracker.get_product_status(product_url)
+        
+        # Get all possible variations first
+        logging.info("Getting initial login to check variations")
+        login(driver, wait, rate_limiter)  # Initial login to check variations
+        
+        rate_limiter.wait()
+        driver.get(product_url)
+        add_random_delay(2, 4)
+        
+        variations = get_product_variations(driver, wait)
+        logging.info(f"Found {len(variations)} variations to process")
+        
+        # Close initial browser
+        driver.quit()
+        
+        # Process each variation with a new browser instance
+        for variation in variations:
+            variation_key = json.dumps(variation, sort_keys=True)
+            if variation_key in status['variations_tried']:
+                logging.info(f"Skipping already tried variation: {variation}")
+                continue
+                
+            logging.info(f"Processing variation: {variation}")
+            process_single_variation(product_url, variation, variation_tracker, rate_limiter)
+            
+    except Exception as e:
+        logging.error(f"Error processing product {product_url}: {str(e)}")
+    finally:
+        if driver and driver.service.is_connectable():
+            driver.quit()
+
+def process_single_variation(product_url, variation, variation_tracker, rate_limiter):
+    """Process a single variation with its own browser instance"""
+    driver = None
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+        wait = WebDriverWait(driver, 45)
+        
+        # Login for this variation
+        logging.info("Logging in for new variation")
+        login(driver, wait, rate_limiter)
+        
+        # Navigate to product
+        rate_limiter.wait()
+        driver.get(product_url)
+        add_random_delay(2, 4)
+        
+        # Select the variation options
+        select_variation(driver, wait, variation)
+        
+        # Set quantity
+        set_quantity(driver, wait, config.DEFAULT_QUANTITY)
+        
+        # Create product data dictionary before add_product_to_cart call
+        product_data = {
+            'url': product_url,
+            'variations': variation
+        }
+        
+        # Add to cart
+        add_product_to_cart(driver, wait, product_data, rate_limiter)
+        
+        # Handle product specification form if needed
+        handle_product_specification_form(driver, wait)
+        
+        # Mark as succeeded
+        variation_tracker.update_variation_status(product_url, variation, success=True)
+        logging.info(f"Successfully added variation: {variation}")
+        
+    except Exception as e:
+        logging.error(f"Failed to add variation {variation}: {str(e)}")
+        variation_tracker.update_variation_status(product_url, variation, success=False)
+    finally:
+        if driver:
+            driver.quit()
 
 def main():
     # Add argument parsing
@@ -110,7 +205,12 @@ def main():
             logging.info(f"Loaded {len(all_product_links)} product links from {json_file_path}")
         else:
             logging.warning(f"Product links file not found at {json_file_path}. Collecting new links.")
-            all_product_links = collect_product_links(rate_limiter)
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+            wait = WebDriverWait(driver, 10)
+            try:
+                all_product_links = collect_product_links(driver, wait, rate_limiter)
+            finally:
+                driver.quit()
 
     if not all_product_links:
         logging.error("No product links collected. Exiting.")
@@ -121,8 +221,9 @@ def main():
     skipped_products = 0
     
     for product in all_product_links:
-        if any(item['name'] == product['name'] for item in existing_cart_data):
-            logging.info(f"Skipping already processed product: {product['name']}")
+        if is_product_processed(product, existing_cart_data):
+            logging.info(f"Skipping already processed product: {product['name']} "
+                        f"with variations: {product.get('variations', {})}")
             skipped_products += 1
             continue
         products_to_process.append(product)
