@@ -3,4 +3,4 @@ __pycache__/
 *.log
 *.csv
 *.json
-*.env
+.env
