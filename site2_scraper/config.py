@@ -6,16 +6,17 @@ load_dotenv()
 
 # Scraper configuration
 MAX_PAGES = 37
-MAX_WORKERS = 10 # might be max at 3
+MAX_WORKERS = 3 # might be max at 3
 
 # Rate limiter configuration
 MAX_REQUESTS = 20
 TIME_WINDOW = 60
 
 # URLs
-LOGIN_URL = "https://www.svpmeds.com/login/"
-PRODUCTS_PAGE_URL = "https://www.svpmeds.com/product-category/prescription-medicines/?orderby=popularity"
-CART_URL = "https://www.svpmeds.com/cart-2/"
+LOGIN_URL = os.getenv("SITE2_LOGIN_URL")
+PRODUCTS_PAGE_URL = os.getenv("SITE2_PRODUCTS_PAGE_URL")
+CART_URL = os.getenv("SITE2_CART_URL")
+BASE_URL = os.getenv("SITE2_BASE_URL")
 
 # Login credentials
 SITE2_USERNAME = os.getenv("SITE2_USERNAME")
