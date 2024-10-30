@@ -8,7 +8,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from site2_scraper import config
-from site2_scraper.browser_actions import login, add_random_delay
+from site2_scraper.browser_actions import login, add_random_delay, apply_cookies
 from common.rate_limiter import RateLimiter
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -16,20 +16,41 @@ import os
 import time
 import concurrent.futures
 
-def process_single_product(product, rate_limiter):
+def process_single_product(product, rate_limiter, cookies=None):
+    if not cookies:
+        logging.error("No cookies provided to process_single_product")
+        return {"url": product["url"], "name": product["name"], "added_to_cart": False}
+        
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-    wait = WebDriverWait(driver, 45)  # Increased to 45 seconds
+    wait = WebDriverWait(driver, 45)
     
     try:
-        logging.info(f"Processing product: {product['name']} (URL: {product['url']})")
+        # First navigate to the domain (required before setting cookies)
+        driver.get(config.BASE_URL)
         
-        login(driver, wait, rate_limiter)
-        logging.info("Login successful")
+        # Apply cookies and verify login status
+        if apply_cookies(driver, cookies):
+            logging.info("Successfully applied cookies")
+            add_random_delay(1, 2)
+        else:
+            logging.warning("Failed to apply cookies, attempting new login")
+            cookies = login(driver, wait, rate_limiter)
+            if not cookies:
+                logging.error("Failed to obtain new cookies")
+                return {"url": product["url"], "name": product["name"], "added_to_cart": False}
+        
+        logging.info(f"Processing product: {product['name']} (URL: {product['url']})")
         
         rate_limiter.wait()
         driver.get(product['url'])
         logging.info(f"Navigated to product page: {product['url']}")
         add_random_delay(2, 4)
+        
+        # If we get redirected to login page, try to login again
+        if "login" in driver.current_url.lower():
+            logging.info("Session expired, logging in again")
+            cookies = login(driver, wait, rate_limiter)
+            driver.get(product['url'])  # Try to navigate to product again
         
         logging.info("Handling product variations")
         handle_variations(driver, wait)
@@ -37,7 +58,7 @@ def process_single_product(product, rate_limiter):
         logging.info("Setting quantity to 1")
         quantity_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='quantity']")))
         quantity_input.clear()
-        quantity_input.send_keys("1")
+        quantity_input.send_keys("30")
         
         logging.info("Clicking 'Add to Cart' button")
         add_to_cart_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".single_add_to_cart_button")))
@@ -301,10 +322,25 @@ def main():
         logging.error("No product links collected. Exiting.")
         return
 
-    # Process products in parallel
+    # Login once at the start and save cookies
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    wait = WebDriverWait(driver, 10)
+    cookies = None
+    
+    try:
+        driver.get(config.BASE_URL)
+        cookies = login(driver, wait, rate_limiter)
+        logging.info("Initial login successful, cookies captured")
+    except Exception as e:
+        logging.error(f"Initial login failed: {str(e)}")
+        raise
+    finally:
+        driver.quit()
+
+    # Process products in parallel with saved cookies
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(process_single_product, product, rate_limiter) 
-                   for product in all_product_links]
+        futures = [executor.submit(process_single_product, product, rate_limiter, cookies) 
+                  for product in all_product_links]
         
         for future in concurrent.futures.as_completed(futures):
             result = future.result()

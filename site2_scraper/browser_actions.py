@@ -19,9 +19,9 @@ def add_random_delay(min_seconds=2, max_seconds=5):
 
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def login_with_retry(driver, wait, rate_limiter):
-    """Handle site login"""
+    """Handle site login and return cookies"""
     try:
-        rate_limiter.wait()  # Changed from wait_if_needed() to wait()
+        rate_limiter.wait()
         driver.get(config.LOGIN_URL)
         time.sleep(random.uniform(2, 4))
         
@@ -52,15 +52,47 @@ def login_with_retry(driver, wait, rate_limiter):
         
         time.sleep(random.uniform(3, 5))
         
+        # After successful login, get cookies
+        cookies = driver.get_cookies()
+        if not cookies:
+            logging.error("No cookies obtained after successful login")
+            return None
+            
+        logging.info("Successfully captured login cookies")
+        return cookies
+        
     except Exception as e:
         logging.error(f"Login failed: {str(e)}")
-        logging.error(f"Current URL: {driver.current_url}")
-        logging.error(f"Page source: {driver.page_source}")
-        raise
+        return None
+
+def apply_cookies(driver, cookies):
+    """Apply saved cookies to a new browser session"""
+    if not cookies:
+        logging.error("No cookies provided to apply_cookies")
+        return False
+        
+    try:
+        for cookie in cookies:
+            driver.add_cookie(cookie)
+        logging.info("Applied saved cookies to browser session")
+        # Refresh the page to activate cookies
+        driver.refresh()
+        add_random_delay(1, 2)
+        
+        # Verify login status (you might need to adjust this based on your site)
+        if "login" in driver.current_url.lower():
+            logging.warning("Still on login page after applying cookies")
+            return False
+            
+        return True
+    except Exception as e:
+        logging.warning(f"Failed to apply cookies: {str(e)}")
+        return False
 
 def login(driver, wait, rate_limiter):
     try:
-        login_with_retry(driver, wait, rate_limiter)
+        cookies = login_with_retry(driver, wait, rate_limiter)
+        return cookies
     except Exception as e:
         logging.error(f"Failed to log in after 3 attempts: {str(e)}")
         raise
@@ -237,3 +269,27 @@ def collect_product_links(driver, wait, rate_limiter):
 
 
 
+
+def apply_cookies(driver, cookies):
+    """Apply saved cookies to a new browser session"""
+    if not cookies:
+        logging.error("No cookies provided to apply_cookies")
+        return False
+        
+    try:
+        for cookie in cookies:
+            driver.add_cookie(cookie)
+        logging.info("Applied saved cookies to browser session")
+        # Refresh the page to activate cookies
+        driver.refresh()
+        add_random_delay(1, 2)
+        
+        # Verify login status (you might need to adjust this based on your site)
+        if "login" in driver.current_url.lower():
+            logging.warning("Still on login page after applying cookies")
+            return False
+            
+        return True
+    except Exception as e:
+        logging.warning(f"Failed to apply cookies: {str(e)}")
+        return False

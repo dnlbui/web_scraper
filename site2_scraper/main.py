@@ -32,13 +32,30 @@ def add_to_cart_from_queue(cart_manager, rate_limiter):
     wait = WebDriverWait(driver, 10)
     
     try:
+        # First navigate to base domain
+        driver.get(config.BASE_URL)
+        
+        # Login once at the start and get cookies
+        cookies = None
+        
+        try:
+            driver.get(config.BASE_URL)
+            cookies = login(driver, wait, rate_limiter)
+            logging.info("Initial login successful, cookies captured")
+        except Exception as e:
+            logging.error(f"Initial login failed: {str(e)}")
+            raise
+        finally:
+            driver.quit()
+
+        if not cookies:
+            logging.error("No cookies obtained from initial login. Exiting.")
+            return
+
         while True:
             try:
                 # Get next product from queue with timeout
                 product_data = cart_manager.product_queue.get(timeout=30)
-                
-                # Login first (for each product, to ensure we're always logged in)
-                login(driver, wait, rate_limiter)
                 
                 # Navigate to product page
                 rate_limiter.wait()
@@ -56,6 +73,12 @@ def add_to_cart_from_queue(cart_manager, rate_limiter):
                 break
             except Exception as e:
                 logging.error(f"Error adding product to cart: {str(e)}")
+                # If the error is related to login session expiring, try to login again
+                try:
+                    driver.get(config.BASE_URL)
+                    cookies = login(driver, wait, rate_limiter)
+                except Exception as login_error:
+                    logging.error(f"Failed to re-login: {str(login_error)}")
                 continue
                 
     finally:
@@ -130,12 +153,32 @@ def main():
     logging.info(f"Found {skipped_products} already processed products")
     logging.info(f"Processing {len(products_to_process)} new products in parallel with {config.MAX_WORKERS} workers")
 
+    # Login once at the start and get cookies
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    wait = WebDriverWait(driver, 10)
+    cookies = None
+    
+    try:
+        driver.get(config.BASE_URL)
+        cookies = login(driver, wait, rate_limiter)
+        logging.info("Initial login successful, cookies captured")
+    except Exception as e:
+        logging.error(f"Initial login failed: {str(e)}")
+        raise
+    finally:
+        driver.quit()
+
+    if not cookies:
+        logging.error("No cookies obtained from initial login. Exiting.")
+        return
+
+    # Process products in parallel with saved cookies
     successful_additions = 0
     failed_additions = 0
     
     if products_to_process:
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
-            futures = [executor.submit(process_single_product, product, rate_limiter) 
+            futures = [executor.submit(process_single_product, product, rate_limiter, cookies) 
                       for product in products_to_process]
             
             for future in concurrent.futures.as_completed(futures):
