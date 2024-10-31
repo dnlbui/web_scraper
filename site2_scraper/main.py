@@ -18,6 +18,7 @@ from site2_scraper.browser_actions import login, add_product_to_cart, collect_pr
 from site2_scraper.data_processing import process_single_product, extract_cart_data, save_cart_data
 from common.rate_limiter import RateLimiter
 from site2_scraper import config
+from site2_scraper.database import Database
 
 class CartManager:
     def __init__(self):
@@ -88,7 +89,7 @@ def main():
     # Add argument parsing
     parser = argparse.ArgumentParser(description='Cart scraper with source selection')
     parser.add_argument('--use-warnings', action='store_true', 
-                       help='Use failed_products.json instead of product_links.json')
+                       help='Use failed_products table instead of product_links table')
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -104,36 +105,22 @@ def main():
     rate_limiter = RateLimiter(max_requests=20, time_window=60)
     cart_manager = CartManager()
     
-    json_file_path = 'product_links.json'
-    failed_products_path = 'failed_products.json'
-    cart_contents_file = 'cart_contents.json'
+    # Initialize database
+    db = Database()
     
-    # Load existing cart data if available
-    existing_cart_data = []
-    if os.path.exists(cart_contents_file):
-        with open(cart_contents_file, 'r') as f:
-            existing_cart_data = json.load(f)
-        logging.info(f"Loaded {len(existing_cart_data)} existing items from {cart_contents_file}")
+    # Load existing cart data
+    existing_cart_data = db.get_cart_data()
+    logging.info(f"Loaded {len(existing_cart_data)} existing items from database")
 
     # Load product links based on flag
     if args.use_warnings:
-        logging.info("Using failed_products.json as source")
-        if os.path.exists(failed_products_path):
-            with open(failed_products_path, 'r') as f:
-                all_product_links = json.load(f)
-            logging.info(f"Loaded {len(all_product_links)} product links from {failed_products_path}")
-        else:
-            logging.error(f"Failed products file not found at {failed_products_path}. Exiting.")
-            return
+        logging.info("Using failed_products table as source")
+        all_product_links = db.get_product_links()
+        logging.info(f"Loaded {len(all_product_links)} product links from failed_products table")
     else:
-        logging.info("Using product_links.json as source")
-        if os.path.exists(json_file_path):
-            with open(json_file_path, 'r') as f:
-                all_product_links = json.load(f)
-            logging.info(f"Loaded {len(all_product_links)} product links from {json_file_path}")
-        else:
-            logging.warning(f"Product links file not found at {json_file_path}. Collecting new links.")
-            all_product_links = collect_product_links(rate_limiter)
+        logging.info("Using product_links table as source")
+        all_product_links = db.get_product_links()
+        logging.info(f"Loaded {len(all_product_links)} product links from product_links table")
 
     if not all_product_links:
         logging.error("No product links collected. Exiting.")

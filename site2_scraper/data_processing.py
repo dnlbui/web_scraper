@@ -121,10 +121,17 @@ def process_single_product(product, rate_limiter, cookies=None):
         else:
             logging.error(f"Failed to process product {product['url']}: No cart data found")
 
-        # After clicking add to cart, check for WooCommerce error message
+        # After clicking add to cart, check for WooCommerce error messages
         woo_errors = driver.find_elements(By.CSS_SELECTOR, "ul.woocommerce-error li")
         for error in woo_errors:
-            if "because there is not enough stock" in error.text:
+            # Add more stock-related error phrases to catch
+            stock_error_phrases = [
+                "not enough stock",
+                "out of stock",
+                "no stock available",
+                "insufficient stock"
+            ]
+            if any(phrase in error.text.lower() for phrase in stock_error_phrases):
                 logging.info(f"Product shows no stock after add to cart attempt: {product['name']}")
                 save_out_of_stock_product({
                     'url': product['url'],
@@ -287,16 +294,10 @@ def extract_cart_data(driver, wait, rate_limiter):
         take_error_screenshot(driver, 'cart_extraction_error')
         return []
 
-def save_cart_data(cart_data, filename):
+def save_cart_data(cart_data, db):
     if cart_data:
-        fieldnames = ['name', 'price', 'quantity']
-        
-        with open(filename, 'w', newline='', encoding='utf-8') as file:
-            writer = csv.DictWriter(file, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(cart_data)
-            
-        logging.info(f"Cart data saved to {filename}")
+        db.save_cart_data(cart_data)
+        logging.info(f"Cart data saved to database")
     else:
         logging.warning("No cart data to save")
 
@@ -333,16 +334,12 @@ def handle_product_specification_form(driver, wait):
         logging.info(f"Page source: {driver.page_source[:1000]}...")  # Log first 1000 chars of page source
         raise
 
-def save_cart_data_incrementally(cart_data, filename="cart_contents.json"):
-    """Save cart data to JSON file, merging with existing data"""
+def save_cart_data_incrementally(cart_data, db):
+    """Save cart data to database, merging with existing data"""
     try:
-        # Load existing data if file exists
-        if os.path.exists(filename):
-            with open(filename, 'r') as file:
-                existing_data = json.load(file)
-        else:
-            existing_data = []
-            
+        # Load existing data
+        existing_data = db.get_cart_data()
+        
         # Add new items and update existing ones
         for item in cart_data:
             normalized_new_name = normalize_product_name(item['name'])
@@ -351,14 +348,10 @@ def save_cart_data_incrementally(cart_data, filename="cart_contents.json"):
                 for existing_item in existing_data
             )
             if not is_duplicate:
-                existing_data.append(item)
+                db.save_cart_data([item])
                 logging.info(f"Added new item to cart data: {item['name']}")
-        
-        # Save updated data
-        with open(filename, 'w') as file:
-            json.dump(existing_data, file, indent=2)
-            
-        logging.info(f"Cart data saved incrementally to {filename}")
+                
+        logging.info("Cart data saved incrementally to database")
     except Exception as e:
         logging.error(f"Error saving cart data incrementally: {str(e)}")
 
@@ -369,25 +362,19 @@ def normalize_product_name(name):
             not line.startswith(('Pet Name:', 'Doctor\'s Name:'))]
     return '\n'.join(lines)
 
-def save_out_of_stock_product(product_data, filename="out_of_stock_products.json"):
-    """Save out of stock product to JSON file, avoiding duplicates"""
+def save_out_of_stock_product(product_data, db):
+    """Save out of stock product to database, avoiding duplicates"""
     try:
-        # Load existing data if file exists
-        if os.path.exists(filename):
-            with open(filename, 'r') as file:
-                out_of_stock_products = json.load(file)
-        else:
-            out_of_stock_products = []
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR IGNORE INTO out_of_stock_products (name, url)
+                VALUES (?, ?)
+            ''', (product_data['name'], product_data['url']))
+            conn.commit()
             
-        # Check if product URL already exists
-        if not any(item['url'] == product_data['url'] for item in out_of_stock_products):
-            out_of_stock_products.append(product_data)
-            
-            # Save updated data
-            with open(filename, 'w') as file:
-                json.dump(out_of_stock_products, file, indent=2)
-                
-            logging.info(f"Added out of stock product to {filename}: {product_data['name']}")
+        if cursor.rowcount > 0:
+            logging.info(f"Added out of stock product to database: {product_data['name']}")
             
     except Exception as e:
         logging.error(f"Error saving out of stock product data: {str(e)}")
