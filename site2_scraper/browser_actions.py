@@ -9,6 +9,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from site2_scraper import config
 from retrying import retry
+from site2_scraper.utils import take_error_screenshot
 
 # Login credentials
 SITE2_USERNAME = os.getenv("SITE2_USERNAME")
@@ -63,6 +64,7 @@ def login_with_retry(driver, wait, rate_limiter):
         
     except Exception as e:
         logging.error(f"Login failed: {str(e)}")
+        take_error_screenshot(driver, 'login_failed')
         return None
 
 def apply_cookies(driver, cookies):
@@ -142,6 +144,7 @@ def add_product_to_cart(driver, wait, product_element, rate_limiter):
         
     except Exception as e:
         logging.error(f"Failed to add product to cart: {str(e)}")
+        take_error_screenshot(driver, 'add_to_cart_failed')
         raise
 
 
@@ -214,8 +217,7 @@ def collect_product_links(driver, wait, rate_limiter):
                 product_area = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "product_area")))
             except TimeoutException:
                 logging.warning(f"Timeout waiting for product area on page {page}")
-                driver.save_screenshot(f"debug_screenshot_page_{page}_before_refresh.png")
-                logging.info(f"Screenshot saved: debug_screenshot_page_{page}_before_refresh.png")
+                take_error_screenshot(driver, f'product_timeout_page_{page}')
                 
                 # Try to refresh the page and wait again
                 driver.refresh()
@@ -223,8 +225,7 @@ def collect_product_links(driver, wait, rate_limiter):
                     product_area = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "product_area")))
                 except TimeoutException:
                     logging.error(f"Failed to load product area on page {page} after refresh")
-                    driver.save_screenshot(f"debug_screenshot_page_{page}_after_refresh.png")
-                    logging.info(f"Screenshot saved: debug_screenshot_page_{page}_after_refresh.png")
+                    take_error_screenshot(driver, f'product_timeout_after_refresh_page_{page}')
                     logging.error(f"Current URL after failed refresh: {driver.current_url}")
                     break
 

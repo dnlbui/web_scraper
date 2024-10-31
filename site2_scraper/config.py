@@ -6,7 +6,7 @@ load_dotenv()
 
 # Scraper configuration
 MAX_PAGES = 37
-MAX_WORKERS = 3 # might be max at 3
+MAX_WORKERS = 10 # might be max at 3
 
 # Rate limiter configuration
 MAX_REQUESTS = 20

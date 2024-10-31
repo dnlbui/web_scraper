@@ -15,6 +15,7 @@ import json
 import os
 import time
 import concurrent.futures
+from site2_scraper.utils import take_error_screenshot
 
 def process_single_product(product, rate_limiter, cookies=None):
     if not cookies:
@@ -45,6 +46,23 @@ def process_single_product(product, rate_limiter, cookies=None):
         driver.get(product['url'])
         logging.info(f"Navigated to product page: {product['url']}")
         add_random_delay(2, 4)
+        
+        # Check if product is out of stock on product page
+        out_of_stock = driver.find_elements(By.CSS_SELECTOR, "p.stock.out-of-stock")
+        if out_of_stock:
+            logging.info(f"Product is out of stock: {product['name']}")
+            save_out_of_stock_product({
+                'url': product['url'],
+                'name': product.get('name', 'Unknown'),
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'reason': 'product_page_out_of_stock'
+            })
+            return {
+                'url': product['url'],
+                'name': product.get('name', 'Unknown'),
+                'added_to_cart': False,
+                'status': 'out_of_stock'
+            }
         
         # If we get redirected to login page, try to login again
         if "login" in driver.current_url.lower():
@@ -102,9 +120,29 @@ def process_single_product(product, rate_limiter, cookies=None):
             logging.info(f"Final result data: {json.dumps(result, indent=2)}")
         else:
             logging.error(f"Failed to process product {product['url']}: No cart data found")
+
+        # After clicking add to cart, check for WooCommerce error message
+        woo_errors = driver.find_elements(By.CSS_SELECTOR, "ul.woocommerce-error li")
+        for error in woo_errors:
+            if "because there is not enough stock" in error.text:
+                logging.info(f"Product shows no stock after add to cart attempt: {product['name']}")
+                save_out_of_stock_product({
+                    'url': product['url'],
+                    'name': product.get('name', 'Unknown'),
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'reason': 'add_to_cart_no_stock',
+                    'error_message': error.text
+                })
+                return {
+                    'url': product['url'],
+                    'name': product.get('name', 'Unknown'),
+                    'added_to_cart': False,
+                    'status': 'out_of_stock'
+                }
+
     except Exception as e:
         logging.error(f"Error processing product {product['url']}: {str(e)}")
-        logging.exception("Traceback:")
+        take_error_screenshot(driver, 'process_product_failed')
         result = {
             'url': product['url'],
             'name': product.get('name', 'Unknown'),
@@ -118,10 +156,25 @@ def process_single_product(product, rate_limiter, cookies=None):
 
 def handle_variations(driver, wait):
     try:
-        # Wait for variations to be present
-        variation_selects = wait.until(
-            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "select[data-attribute_name]"))
-        )
+        # Try different selectors for variations
+        selectors = [
+            "select[data-attribute_name]",  # Original selector
+            "div.variations select",        # General variations selector
+            "div.vp-form select.select"     # The new structure you found
+        ]
+        
+        variation_selects = []
+        for selector in selectors:
+            try:
+                elements = wait.until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+                )
+                if elements:
+                    variation_selects.extend(elements)
+                    logging.info(f"Found variations using selector: {selector}")
+            except TimeoutException:
+                logging.debug(f"No variations found with selector: {selector}")
+                continue
         
         if not variation_selects:
             logging.info("No variations found for this product")
@@ -129,14 +182,35 @@ def handle_variations(driver, wait):
             
         for select in variation_selects:
             try:
-                Select(select).select_by_index(1)  # Select first non-default option
+                # Log the select element details for debugging
+                logging.debug(f"Attempting to select variation: {select.get_attribute('name')} / {select.get_attribute('id')}")
+                
+                # Wait for element to be clickable
+                wait.until(EC.element_to_be_clickable(select))
+                
+                # Get all available options
+                select_element = Select(select)
+                options = select_element.options
+                
+                # Skip if only has default option
+                if len(options) <= 1:
+                    logging.debug(f"Skipping select with insufficient options: {select.get_attribute('name')}")
+                    continue
+                
+                # Select first non-default option
+                select_element.select_by_index(1)
+                logging.info(f"Successfully selected option for: {select.get_attribute('name')}")
                 time.sleep(1)  # Small delay between selections
+                
             except Exception as e:
-                logging.debug(f"Could not select variation: {str(e)}")  # Debug level instead of warning
+                logging.debug(f"Could not select variation: {str(e)}")
+                # Take screenshot on failure
+                take_error_screenshot(driver, 'variation_selection_failed')
                 continue
                 
     except Exception as e:
-        logging.debug(f"No variations to handle: {str(e)}")  # Debug level instead of warning
+        logging.debug(f"Error handling variations: {str(e)}")
+        take_error_screenshot(driver, 'variations_handling_failed')
 
 def handle_additional_options(driver, wait):
     """Handle additional options on the next page if necessary"""
@@ -210,7 +284,7 @@ def extract_cart_data(driver, wait, rate_limiter):
     except Exception as e:
         logging.error(f"Failed to extract cart data: {str(e)}")
         logging.error(f"Current URL: {driver.current_url}")
-        logging.error(f"Page source: {driver.page_source}")
+        take_error_screenshot(driver, 'cart_extraction_error')
         return []
 
 def save_cart_data(cart_data, filename):
@@ -294,6 +368,29 @@ def normalize_product_name(name):
     lines = [line.strip() for line in name.split('\n') if line.strip() and 
             not line.startswith(('Pet Name:', 'Doctor\'s Name:'))]
     return '\n'.join(lines)
+
+def save_out_of_stock_product(product_data, filename="out_of_stock_products.json"):
+    """Save out of stock product to JSON file, avoiding duplicates"""
+    try:
+        # Load existing data if file exists
+        if os.path.exists(filename):
+            with open(filename, 'r') as file:
+                out_of_stock_products = json.load(file)
+        else:
+            out_of_stock_products = []
+            
+        # Check if product URL already exists
+        if not any(item['url'] == product_data['url'] for item in out_of_stock_products):
+            out_of_stock_products.append(product_data)
+            
+            # Save updated data
+            with open(filename, 'w') as file:
+                json.dump(out_of_stock_products, file, indent=2)
+                
+            logging.info(f"Added out of stock product to {filename}: {product_data['name']}")
+            
+    except Exception as e:
+        logging.error(f"Error saving out of stock product data: {str(e)}")
 
 def main():
     logging.basicConfig(
