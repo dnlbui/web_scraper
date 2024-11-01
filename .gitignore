@@ -5,3 +5,4 @@ __pycache__/
 *.json
 .env
 error_screenshots*
+*.db
