@@ -26,3 +26,26 @@ def take_error_screenshot(driver, error_type):
     except Exception as e:
         logging.warning(f"Failed to take error screenshot: {str(e)}")
         return None
+
+def normalize_product_name(name):
+    """Normalize product name and extract additional details"""
+    details = {
+        'name': '',
+        'strength': '',
+        'bottle_size': ''
+    }
+    
+    lines = [line.strip() for line in name.split('\n') if line.strip()]
+    
+    # First line is always the base product name
+    if lines:
+        details['name'] = lines[0]
+    
+    # Look for strength and bottle size in remaining lines
+    for line in lines:
+        if line.startswith('Strength:'):
+            details['strength'] = line.replace('Strength:', '').strip()
+        elif line.startswith('Bottle Size:'):
+            details['bottle_size'] = line.replace('Bottle Size:', '').strip()
+            
+    return details

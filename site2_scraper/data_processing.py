@@ -15,13 +15,20 @@ import json
 import os
 import time
 import concurrent.futures
-from site2_scraper.utils import take_error_screenshot
+from site2_scraper.utils import take_error_screenshot, normalize_product_name
 
-def process_single_product(product, rate_limiter, cookies=None):
+def process_single_product(product, rate_limiter, db, cookies=None):
     if not cookies:
         logging.error("No cookies provided to process_single_product")
         return {"url": product["url"], "name": product["name"], "added_to_cart": False}
         
+    # Update status to processing using the database method
+    db.update_processing_status(
+        url=product['url'],
+        name=product['name'],
+        status='processing'
+    )
+    
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
     wait = WebDriverWait(driver, 45)
     
@@ -51,18 +58,34 @@ def process_single_product(product, rate_limiter, cookies=None):
         out_of_stock = driver.find_elements(By.CSS_SELECTOR, "p.stock.out-of-stock")
         if out_of_stock:
             logging.info(f"Product is out of stock: {product['name']}")
-            save_out_of_stock_product({
-                'url': product['url'],
-                'name': product.get('name', 'Unknown'),
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'reason': 'product_page_out_of_stock'
-            })
+            db.mark_product_out_of_stock(product['url'], product['name'])
+            db.update_processing_status(product['url'], product['name'], 'out_of_stock')
             return {
                 'url': product['url'],
                 'name': product.get('name', 'Unknown'),
                 'added_to_cart': False,
                 'status': 'out_of_stock'
             }
+        
+        # Check for WooCommerce error messages first
+        woo_errors = driver.find_elements(By.CSS_SELECTOR, "ul.woocommerce-error li")
+        for error in woo_errors:
+            stock_error_phrases = [
+                "not enough stock",
+                "out of stock",
+                "no stock available",
+                "insufficient stock"
+            ]
+            if any(phrase in error.text.lower() for phrase in stock_error_phrases):
+                logging.info(f"Product shows no stock after add to cart attempt: {product['name']}")
+                db.mark_product_out_of_stock(product['url'], product['name'])
+                db.update_processing_status(product['url'], product['name'], 'out_of_stock')
+                return {
+                    'url': product['url'],
+                    'name': product.get('name', 'Unknown'),
+                    'added_to_cart': False,
+                    'status': 'out_of_stock'
+                }
         
         # If we get redirected to login page, try to login again
         if "login" in driver.current_url.lower():
@@ -93,7 +116,7 @@ def process_single_product(product, rate_limiter, cookies=None):
         wait.until(EC.url_contains("/cart-2/"))
         logging.info(f"Redirected to: {driver.current_url}")
         
-        # Remove the redundant cart-contents check and go straight to data extraction
+        # Extract cart data
         logging.info("Extracting cart data")
         cart_data = extract_cart_data(driver, wait, rate_limiter)
         
@@ -105,61 +128,41 @@ def process_single_product(product, rate_limiter, cookies=None):
                 logging.info(f"    Quantity: {item.get('quantity', 'N/A')}")
             
             # Save cart data incrementally after successful extraction
-            save_cart_data_incrementally(cart_data)
+            save_cart_data_incrementally(cart_data, db)
+            db.update_processing_status(product['url'], product['name'], 'completed')
+            return {
+                'url': product['url'],
+                'name': product['name'],
+                'added_to_cart': True,
+                'cart_data': cart_data
+            }
         else:
             logging.warning("No cart data was extracted")
-        
-        result = {
-            'url': product['url'],
-            'name': product.get('name', 'Unknown'),
-            'added_to_cart': bool(cart_data),  # Only mark as successful if we got cart data
-            'cart_data': cart_data
-        }
-        if cart_data:
-            logging.info(f"Successfully processed product: {result['name']}")
-            logging.info(f"Final result data: {json.dumps(result, indent=2)}")
-        else:
-            logging.error(f"Failed to process product {product['url']}: No cart data found")
-
-        # After clicking add to cart, check for WooCommerce error messages
-        woo_errors = driver.find_elements(By.CSS_SELECTOR, "ul.woocommerce-error li")
-        for error in woo_errors:
-            # Add more stock-related error phrases to catch
-            stock_error_phrases = [
-                "not enough stock",
-                "out of stock",
-                "no stock available",
-                "insufficient stock"
-            ]
-            if any(phrase in error.text.lower() for phrase in stock_error_phrases):
-                logging.info(f"Product shows no stock after add to cart attempt: {product['name']}")
-                save_out_of_stock_product({
-                    'url': product['url'],
-                    'name': product.get('name', 'Unknown'),
-                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                    'reason': 'add_to_cart_no_stock',
-                    'error_message': error.text
-                })
-                return {
-                    'url': product['url'],
-                    'name': product.get('name', 'Unknown'),
-                    'added_to_cart': False,
-                    'status': 'out_of_stock'
-                }
+            db.update_processing_status(product['url'], product['name'], 'failed', 'No cart data extracted')
+            return {
+                'url': product['url'],
+                'name': product['name'],
+                'added_to_cart': False,
+                'status': 'failed'
+            }
 
     except Exception as e:
-        logging.error(f"Error processing product {product['url']}: {str(e)}")
+        error_msg = str(e)
+        logging.error(f"Failed to process product {product['url']}: {error_msg}")
         take_error_screenshot(driver, 'process_product_failed')
-        result = {
+        
+        # Mark the product as failed and update its status
+        db.mark_product_failed(product['url'], product['name'], error_msg)
+        db.update_processing_status(product['url'], product['name'], 'failed', error_msg)
+        
+        return {
             'url': product['url'],
             'name': product.get('name', 'Unknown'),
             'added_to_cart': False,
-            'error': str(e)
+            'error': error_msg
         }
     finally:
         driver.quit()
-    
-    return result
 
 def handle_variations(driver, wait):
     try:
@@ -337,49 +340,67 @@ def handle_product_specification_form(driver, wait):
 def save_cart_data_incrementally(cart_data, db):
     """Save cart data to database, merging with existing data"""
     try:
-        # Load existing data
         existing_data = db.get_cart_data()
+        new_items = []
         
-        # Add new items and update existing ones
         for item in cart_data:
-            normalized_new_name = normalize_product_name(item['name'])
+            details_new = normalize_product_name(item['name'])
             is_duplicate = any(
-                normalize_product_name(existing_item['name']) == normalized_new_name
+                normalize_product_name(existing_item['name'])['name'] == details_new['name']
                 for existing_item in existing_data
             )
+            
             if not is_duplicate:
-                db.save_cart_data([item])
-                logging.info(f"Added new item to cart data: {item['name']}")
-                
-        logging.info("Cart data saved incrementally to database")
+                new_items.append(item)
+                logging.info(f"New item identified: {details_new['name']}")
+        
+        if new_items:
+            db.save_cart_data(new_items)
+            logging.info(f"Added {len(new_items)} new items to cart data")
+        else:
+            logging.info("No new items to add")
+            
     except Exception as e:
         logging.error(f"Error saving cart data incrementally: {str(e)}")
 
-def normalize_product_name(name):
-    """Normalize product name by removing variable fields and whitespace"""
-    # Split into lines and filter out variable fields
-    lines = [line.strip() for line in name.split('\n') if line.strip() and 
-            not line.startswith(('Pet Name:', 'Doctor\'s Name:'))]
-    return '\n'.join(lines)
 
 def save_out_of_stock_product(product_data, db):
     """Save out of stock product to database, avoiding duplicates"""
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
+            
+            # First check if product already exists
             cursor.execute('''
-                INSERT OR IGNORE INTO out_of_stock_products (name, url)
-                VALUES (?, ?)
-            ''', (product_data['name'], product_data['url']))
+                SELECT id FROM out_of_stock_products 
+                WHERE url = ? OR name = ?
+            ''', (product_data['url'], product_data['name']))
+            
+            existing = cursor.fetchone()
+            if existing:
+                logging.info(f"Product already marked as out of stock: {product_data['name']}")
+                return False
+            
+            # If not exists, insert new record
+            cursor.execute('''
+                INSERT INTO out_of_stock_products (name, url, reason, error_message, timestamp)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (
+                product_data['name'],
+                product_data['url'],
+                product_data.get('reason', 'unknown'),
+                product_data.get('error_message', '')
+            ))
             conn.commit()
             
-        if cursor.rowcount > 0:
             logging.info(f"Added out of stock product to database: {product_data['name']}")
+            return True
             
     except Exception as e:
         logging.error(f"Error saving out of stock product data: {str(e)}")
+        return False
 
-def main():
+""" def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -472,3 +493,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ """

@@ -1,56 +1,43 @@
 import logging
 import csv
-import json
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
-from site1_scraper import config
+from selenium.common.exceptions import TimeoutException
+from site2_scraper import config
+from site2_scraper.browser_actions import login, add_random_delay, apply_cookies
+from common.rate_limiter import RateLimiter
+from concurrent.futures import ThreadPoolExecutor
+import json
+import os
+import time
+import concurrent.futures
+from site2_scraper.utils import take_error_screenshot
 
-def process_single_product(product_info, rate_limiter):
+def process_single_product(product, rate_limiter, cookies=None):
+    if not cookies:
+        logging.error("No cookies provided to process_single_product")
+        return {"url": product["url"], "name": product["name"], "added_to_cart": False}
+        
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-    wait = WebDriverWait(driver, 10)
-    
-    logging.info(f"\n{'='*50}\nProcessing product: {product_info['name']}")
-    logging.info(f"URL: {product_info['url']}")
+    wait = WebDriverWait(driver, 45)
     
     try:
-        driver.get(product_info['url'])
-        rate_limiter.wait_if_needed()
+        # First navigate to the domain (required before setting cookies)
+        driver.get(config.BASE_URL)
         
-        try:
-            description_element = wait.until(EC.presence_of_element_located((
-                By.CSS_SELECTOR, "#tab-description")))
-            description = description_element.text.strip()
-            logging.info(f"\nDescription found ({len(description)} characters):")
-            logging.info(f"{description[:200]}...") # Log first 200 chars
-        except Exception as e:
-            logging.error(f"Error getting description: {str(e)}")
-            description = ""
-            
-        info_dl = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".productView-info-dl")))
-        details = {
-            'name': product_info['name'],
-            'url': product_info['url'],
-            'description': description
-        }
-        
-        logging.info("\nCollected product details:")
-        for key, value in details.items():
-            if key == 'description':
-                logging.info(f"{key}: {value[:100]}...")  # First 100 chars of description
-            else:
-                logging.info(f"{key}: {value}")
-        
-        return details
-        
-    except Exception as e:
-        logging.error(f"Error processing product {product_info['name']}: {str(e)}")
-        return None
-    finally:
-        driver.quit()
+        # Apply cookies and verify login status
+        if apply_cookies(driver, cookies):
+            logging.info("Successfully applied cookies")
+            add_random_delay(1, 2)
+        else:
+            logging.warning("Failed to apply cookies, attempting new login")
+            cookies = login(driver, wait, rate_limiter)
+            if not cookies:
+                logging.error("Failed to obtain new cookies")
 
 def save_to_csv(all_products, filename, full_description=False):
     if all_products:

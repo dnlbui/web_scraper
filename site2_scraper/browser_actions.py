@@ -10,6 +10,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from site2_scraper import config
 from retrying import retry
 from site2_scraper.utils import take_error_screenshot
+from site2_scraper.database import Database
 
 # Login credentials
 SITE2_USERNAME = os.getenv("SITE2_USERNAME")
@@ -186,16 +187,15 @@ def navigate_to_sorted_products(driver, wait, rate_limiter):
         raise
 
 def collect_product_links(driver, wait, rate_limiter):
+    db = Database()
     all_product_links = []
     page = 1
-    json_file_path = 'product_links.json'
 
-    # Check if the JSON file already exists
-    if os.path.exists(json_file_path):
-        with open(json_file_path, 'r') as f:
-            all_product_links = json.load(f)
-        logging.info(f"Loaded {len(all_product_links)} product links from {json_file_path}")
-        return all_product_links
+    # Check if products already exist in database
+    existing_links = db.get_product_links()
+    if existing_links:
+        logging.info(f"Loaded {len(existing_links)} product links from database")
+        return existing_links
 
     try:
         # First, ensure we're logged in
@@ -238,7 +238,6 @@ def collect_product_links(driver, wait, rate_limiter):
             
             for product in products:
                 try:
-                    # Find the link within the product's bow_text div
                     link_element = product.find_element(By.CSS_SELECTOR, ".bow_text a")
                     link = link_element.get_attribute('href')
                     name = link_element.text.strip()
@@ -261,10 +260,9 @@ def collect_product_links(driver, wait, rate_limiter):
         logging.error(f"Error in collect_product_links: {str(e)}", exc_info=True)
     
     logging.info(f"Collected a total of {len(all_product_links)} product links")
-    # After collecting all links, save them to a JSON file
-    with open(json_file_path, 'w') as f:
-        json.dump(all_product_links, f)
-    logging.info(f"Saved {len(all_product_links)} product links to {json_file_path}")
+    # Save to database instead of JSON
+    db.save_product_links(all_product_links)
+    logging.info(f"Saved {len(all_product_links)} product links to database")
     return all_product_links
 
 
