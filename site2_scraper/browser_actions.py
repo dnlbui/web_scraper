@@ -100,48 +100,30 @@ def login(driver, wait, rate_limiter):
         logging.error(f"Failed to log in after 3 attempts: {str(e)}")
         raise
 
-def add_product_to_cart(driver, wait, product_element, rate_limiter):
+def add_product_to_cart(driver, wait, product_data, rate_limiter):
     """Handle the process of adding a single product to cart"""
     try:
         rate_limiter.wait_if_needed()
         
-        # Get product name for logging
-        product_name = product_element.find_element(By.CSS_SELECTOR, ".product-name").text
+        # Get product name from the dictionary
+        product_name = product_data.get('name', 'Unknown Product')
         logging.info(f"Processing product: {product_name}")
         
-        # First dropdown selections
-        dropdown1 = Select(product_element.find_element(By.CSS_SELECTOR, "select#dropdown1_id"))
-        add_random_delay(0.5, 1)
-        dropdown1.select_by_index(1)
+        # Use the driver to find elements on the page instead of product_element
+        dropdowns = driver.find_elements(By.CSS_SELECTOR, "select[data-attribute_name^='attribute_']")
         
-        dropdown2 = Select(product_element.find_element(By.CSS_SELECTOR, "select#dropdown2_id"))
-        add_random_delay(0.5, 1)
-        dropdown2.select_by_index(1)
+        for dropdown in dropdowns:
+            select = Select(dropdown)
+            options = select.options
+            if len(options) > 1:  # Make sure there are options to select
+                add_random_delay(0.5, 1)
+                select.select_by_index(1)  # Select first non-default option
         
         add_random_delay(1, 2)
-        add_to_cart = product_element.find_element(By.CSS_SELECTOR, "button.add-to-cart")
+        add_to_cart = driver.find_element(By.CSS_SELECTOR, "button.single_add_to_cart_button")
         add_to_cart.click()
         
-        # Handle modal form
-        form_modal = wait.until(EC.presence_of_element_located((
-            By.CSS_SELECTOR, ".modal-form")))
-        add_random_delay(1, 2)
-        
-        modal_dropdown1 = Select(form_modal.find_element(By.CSS_SELECTOR, "select#modal_dropdown1_id"))
-        add_random_delay(0.5, 1)
-        modal_dropdown1.select_by_index(1)
-        
-        modal_dropdown2 = Select(form_modal.find_element(By.CSS_SELECTOR, "select#modal_dropdown2_id"))
-        add_random_delay(0.5, 1)
-        modal_dropdown2.select_by_index(1)
-        
-        add_random_delay(1, 2)
-        submit_button = form_modal.find_element(By.CSS_SELECTOR, "button[type='submit']")
-        submit_button.click()
-        
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".success-message")))
-        logging.info(f"Successfully added {product_name} to cart")
-        add_random_delay(2, 4)
+        return True
         
     except Exception as e:
         logging.error(f"Failed to add product to cart: {str(e)}")

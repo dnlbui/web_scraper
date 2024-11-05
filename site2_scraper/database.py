@@ -11,7 +11,8 @@ class Database:
 
     @contextmanager
     def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
         try:
             yield conn
         finally:
@@ -83,21 +84,40 @@ class Database:
     def save_cart_data(self, cart_data):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            for item in cart_data:
-                details = normalize_product_name(item['name'])
-                price = float(item['price'].replace('$', '')) if isinstance(item['price'], str) else item['price']
-                cursor.execute('''
-                    INSERT OR REPLACE INTO cart_contents 
-                    (name, price, quantity, strength, bottle_size)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    details['name'],
-                    price,
-                    item['quantity'],
-                    details['strength'],
-                    details['bottle_size']
-                ))
-            conn.commit()
+            try:
+                cursor.execute('BEGIN TRANSACTION')
+                for item in cart_data:
+                    details = normalize_product_name(item['name'])
+                    
+                    # Check for exact duplicate
+                    cursor.execute('''
+                        SELECT id, name FROM cart_contents 
+                        WHERE name = ?
+                    ''', (details['name'],))
+                    
+                    existing = cursor.fetchone()
+                    if existing:
+                        logging.info(f"Skipping duplicate in cart_contents: {details['name']}")
+                        continue
+                    
+                    price = float(item['price'].replace('$', '')) if isinstance(item['price'], str) else item['price']
+                    cursor.execute('''
+                        INSERT INTO cart_contents 
+                        (name, price, quantity, strength, bottle_size)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (
+                        details['name'],
+                        price,
+                        item['quantity'],
+                        details.get('strength', ''),
+                        details.get('bottle_size', '')
+                    ))
+                cursor.execute('COMMIT')
+                logging.info("Transaction committed successfully")
+            except Exception as e:
+                cursor.execute('ROLLBACK')
+                logging.error(f"Transaction rolled back due to error: {str(e)}")
+                raise
 
     def get_cart_data(self):
         with self.get_connection() as conn:
@@ -150,12 +170,18 @@ class Database:
     def mark_product_failed(self, url, name, error_message):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO failed_products 
-                (url, name, error_message)
-                VALUES (?, ?, ?)
-            ''', (url, name, error_message))
-            conn.commit()
+            try:
+                cursor.execute('BEGIN IMMEDIATE')  # This will wait for other transactions
+                cursor.execute('''
+                    INSERT OR REPLACE INTO failed_products 
+                    (url, name, error_message)
+                    VALUES (?, ?, ?)
+                ''', (url, name, error_message))
+                cursor.execute('COMMIT')
+            except Exception as e:
+                cursor.execute('ROLLBACK')
+                logging.error(f"Failed to mark product as failed: {str(e)}")
+                raise
 
     def mark_product_out_of_stock(self, url, name):
         with self.get_connection() as conn:

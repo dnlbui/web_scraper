@@ -35,17 +35,26 @@ def normalize_product_name(name):
         'bottle_size': ''
     }
     
+    # Split by newlines and clean up
     lines = [line.strip() for line in name.split('\n') if line.strip()]
     
     # First line is always the base product name
     if lines:
         details['name'] = lines[0]
     
-    # Look for strength and bottle size in remaining lines
-    for line in lines:
-        if line.startswith('Strength:'):
-            details['strength'] = line.replace('Strength:', '').strip()
-        elif line.startswith('Bottle Size:'):
-            details['bottle_size'] = line.replace('Bottle Size:', '').strip()
-            
+    # Look for strength and bottle size in variations
+    for line in lines[1:]:  # Skip the first line since it's the name
+        # Common strength patterns
+        if any(pattern in line.lower() for pattern in ['mg', 'ml', '%', 'mcg']):
+            details['strength'] = line.strip()
+        # Common bottle size patterns
+        elif any(pattern in line.lower() for pattern in ['ml', 'oz', 'cc']):
+            details['bottle_size'] = line.strip()
+        # If line contains numbers and units, assume it's either strength or bottle size
+        elif any(char.isdigit() for char in line):
+            if not details['strength']:
+                details['strength'] = line.strip()
+            elif not details['bottle_size']:
+                details['bottle_size'] = line.strip()
+    
     return details

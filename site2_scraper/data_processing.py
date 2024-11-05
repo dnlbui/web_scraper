@@ -21,7 +21,26 @@ def process_single_product(product, rate_limiter, db, cookies=None):
     if not cookies:
         logging.error("No cookies provided to process_single_product")
         return {"url": product["url"], "name": product["name"], "added_to_cart": False}
-        
+    
+    # Check for duplicates before starting browser session
+    existing_data = db.get_cart_data()
+    product_name = normalize_product_name(product['name'])['name']
+    
+    is_duplicate = any(
+        normalize_product_name(item['name'])['name'] == product_name
+        for item in existing_data
+    )
+    
+    if is_duplicate:
+        logging.info(f"Skipping duplicate product (pre-check): {product['name']}")
+        db.update_processing_status(product['url'], product['name'], 'completed')
+        return {
+            'url': product['url'],
+            'name': product['name'],
+            'added_to_cart': True,
+            'status': 'duplicate'
+        }
+    
     # Update status to processing using the database method
     db.update_processing_status(
         url=product['url'],
@@ -121,21 +140,39 @@ def process_single_product(product, rate_limiter, db, cookies=None):
         cart_data = extract_cart_data(driver, wait, rate_limiter)
         
         if cart_data:
-            logging.info(f"Cart data extracted successfully:")
-            for item in cart_data:
-                logging.info(f"  - {item.get('name', 'Unknown')}")
-                logging.info(f"    Price: {item.get('price', 'N/A')}")
-                logging.info(f"    Quantity: {item.get('quantity', 'N/A')}")
-            
-            # Save cart data incrementally after successful extraction
-            save_cart_data_incrementally(cart_data, db)
-            db.update_processing_status(product['url'], product['name'], 'completed')
-            return {
-                'url': product['url'],
-                'name': product['name'],
-                'added_to_cart': True,
-                'cart_data': cart_data
-            }
+            logging.info(f"About to save cart data for: {product['name']}")
+            try:
+                # Check if product already exists in cart
+                existing_data = db.get_cart_data()
+                product_name = normalize_product_name(product['name'])['name']
+                
+                is_duplicate = any(
+                    normalize_product_name(item['name'])['name'] == product_name
+                    for item in existing_data
+                )
+                
+                if is_duplicate:
+                    logging.info(f"Skipping duplicate product: {product['name']}")
+                    db.update_processing_status(product['url'], product['name'], 'completed')
+                    return {
+                        'url': product['url'],
+                        'name': product['name'],
+                        'added_to_cart': True,
+                        'status': 'duplicate'
+                    }
+                    
+                save_cart_data_incrementally(cart_data, db)
+                logging.info(f"Successfully saved cart data for: {product['name']}")
+                db.update_processing_status(product['url'], product['name'], 'completed')
+                return {
+                    'url': product['url'],
+                    'name': product['name'],
+                    'added_to_cart': True,
+                    'cart_data': cart_data
+                }
+            except Exception as e:
+                logging.error(f"Failed to save cart data for {product['name']}: {str(e)}")
+                raise
         else:
             logging.warning("No cart data was extracted")
             db.update_processing_status(product['url'], product['name'], 'failed', 'No cart data extracted')
@@ -278,7 +315,7 @@ def extract_cart_data(driver, wait, rate_limiter):
         for item in cart_items:
             try:
                 name = item.find_element(By.CSS_SELECTOR, "td.product-name").text.strip()
-                price = item.find_element(By.CSS_SELECTOR, "td.product-subtotal span.amount").text.strip()
+                price = float(item.find_element(By.CSS_SELECTOR, "td.product-subtotal span.amount").text.strip().replace('$', '').replace(',', '')) if isinstance(item.find_element(By.CSS_SELECTOR, "td.product-subtotal span.amount").text.strip(), str) else item.find_element(By.CSS_SELECTOR, "td.product-subtotal span.amount").text.strip()
                 quantity = item.find_element(By.CSS_SELECTOR, "td.product-quantity input.qty").get_attribute('value')
                 
                 cart_data.append({
@@ -338,13 +375,14 @@ def handle_product_specification_form(driver, wait):
         raise
 
 def save_cart_data_incrementally(cart_data, db):
-    """Save cart data to database, merging with existing data"""
     try:
         existing_data = db.get_cart_data()
         new_items = []
         
         for item in cart_data:
             details_new = normalize_product_name(item['name'])
+            logging.info(f"Processing item for save: {details_new['name']}")
+            
             is_duplicate = any(
                 normalize_product_name(existing_item['name'])['name'] == details_new['name']
                 for existing_item in existing_data
@@ -352,16 +390,24 @@ def save_cart_data_incrementally(cart_data, db):
             
             if not is_duplicate:
                 new_items.append(item)
-                logging.info(f"New item identified: {details_new['name']}")
+                logging.info(f"Queued for save: {details_new['name']}")
+            else:
+                logging.info(f"Skipping duplicate: {details_new['name']}")
         
         if new_items:
             db.save_cart_data(new_items)
-            logging.info(f"Added {len(new_items)} new items to cart data")
-        else:
-            logging.info("No new items to add")
-            
+            # Verify the save
+            saved_data = db.get_cart_data()
+            for item in new_items:
+                name = normalize_product_name(item['name'])['name']
+                if not any(normalize_product_name(saved['name'])['name'] == name for saved in saved_data):
+                    logging.error(f"Failed to verify save for: {name}")
+                else:
+                    logging.info(f"Verified save for: {name}")
+        
     except Exception as e:
-        logging.error(f"Error saving cart data incrementally: {str(e)}")
+        logging.error(f"Error in save_cart_data_incrementally: {str(e)}")
+        raise
 
 
 def save_out_of_stock_product(product_data, db):

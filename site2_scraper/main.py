@@ -177,12 +177,17 @@ def main():
         logging.error("No product links collected. Exiting.")
         return
 
+    # Get existing cart data once
+    existing_cart_data = db.get_cart_data()
+    
     # Filter out products that are already in cart
     products_to_process = []
     skipped_products = 0
     
     for product in all_product_links:
-        if any(item['name'] == product['name'] for item in existing_cart_data):
+        product_name = normalize_product_name(product['name'])['name']
+        if any(normalize_product_name(item['name'])['name'] == product_name 
+               for item in existing_cart_data):
             logging.info(f"Skipping already processed product: {product['name']}")
             skipped_products += 1
             continue
@@ -191,31 +196,27 @@ def main():
     logging.info(f"Found {skipped_products} already processed products")
     logging.info(f"Processing {len(products_to_process)} new products in parallel with {config.MAX_WORKERS} workers")
 
-    # Initialize processing status for new products
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        for product in products_to_process:
-            cursor.execute('''
-                INSERT OR IGNORE INTO processing_status (url, name, status)
-                VALUES (?, ?, 'pending')
-            ''', (product['url'], product['name']))
-        conn.commit()
-
-    # Get products that need processing (pending or failed)
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT url, name FROM processing_status 
-            WHERE status IN ('pending', 'failed')
-            AND (last_attempt IS NULL OR 
-                 datetime(last_attempt, '+1 hour') < datetime('now'))
-            ORDER BY last_attempt ASC NULLS FIRST
-            LIMIT ?
-        ''', (config.MAX_WORKERS * 2,))  # Get twice the number of workers to ensure enough work
-        products_to_process = [{'url': row[0], 'name': row[1]} 
-                             for row in cursor.fetchall()]
+    # Process in smaller batches to better manage sessions
+    batch_size = min(10, len(products_to_process))  # Reduced batch size to 10
+    for i in range(0, len(products_to_process), batch_size):
+        batch = products_to_process[i:i + batch_size]
+        logging.info(f"Processing batch of {len(batch)} products")
         
-    logging.info(f"Found {len(products_to_process)} products to process")
+        # Initialize processing status for batch with transaction
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('BEGIN IMMEDIATE')
+                for product in batch:
+                    cursor.execute('''
+                        INSERT OR IGNORE INTO processing_status (url, name, status)
+                        VALUES (?, ?, 'pending')
+                    ''', (product['url'], product['name']))
+                cursor.execute('COMMIT')
+            except Exception as e:
+                cursor.execute('ROLLBACK')
+                logging.error(f"Failed to initialize batch status: {str(e)}")
+                continue
 
     # Login once at the start and get cookies
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
